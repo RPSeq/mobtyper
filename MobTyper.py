@@ -26,6 +26,7 @@ description: Compute genotype of MEI variants based on breakpoint depth")
     parser.add_argument('-v', '--vcf_in', type=argparse.FileType('r'), required=False, default=False, help='Input VCF file. Overrides Mobster predictions: only the input variants will be genotyped')
     parser.add_argument('-e', '--excludes', type=argparse.FileType('r'), required=False, default=False, help='Regions to exclude (BED-like file)')
     parser.add_argument('-m', '--merge_only', required=False, default=False, action='store_true', help='Only produce a merged VCF from the given mobster dirs')
+    parser.add_argument('-q', '--quiet', required=False, default=False, action='store_true', help='Turn off stderr status outputs')
 
     # parse the arguments
     args = parser.parse_args()
@@ -58,7 +59,7 @@ def main():
 
     #normal mode
     else:
-        genotype_MEIs(args.ref_bams, args.mob_dirs, args.vcf_in, args.excludes, args.output, args.num_samp, args.splflank, args.discflank)
+        genotype_MEIs(args.ref_bams, args.mob_dirs, args.vcf_in, args.excludes, args.output, args.num_samp, args.splflank, args.discflank, args.quiet)
     return
 
 def filter_excludes(variants, exclude_file):
@@ -92,7 +93,7 @@ def merge_mobster(mobster_dirs):
 
     return read_mobster(predictions)        
 
-def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank):
+def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, quiet):
     '''main genotyping function'''
 
     vcf_out = open(vcf_out, 'w+')
@@ -179,9 +180,11 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
     #loop through the MEI calls:
     var_count = 1
     for var in variants:
+        #skip untig and MT calls (these have caused errors, namely negative coords in GL calls.)
         if var.chrom.startswith("GL") or var.chrom == "MT":
             continue
-        sys.stderr.write(str(var.chrom)+"\t"+str(var.pos)+"\n")
+        if not quiet:
+            sys.stderr.write(str(var.chrom)+"\t"+str(var.pos)+"\n")
         #borders = var.info['CI'].split(",")
         var.sample_list = mob_vcf.sample_list
         var.reset_genotypes()
@@ -192,6 +195,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
         #stop = insert + int(borders[1])   
         mei_type = var.info["MEI"] 
 
+        #aggregate evidence counts
         PE = 0
         SR = 0
         SU = 0
@@ -321,8 +325,7 @@ def read_mobster(prediction_files):
     mob_vcf.add_format('AC', 1, 'Int', 'Alt support count')
 
     var_id = 0
-    #set to hold vars, new vars are checked for already existing here
-    var_set = set()
+
     #list will hold union set of vars
     union = []
     for file in prediction_files:
@@ -337,13 +340,6 @@ def read_mobster(prediction_files):
             ME = entry[1]
             #VCF is one-based 
             bnd = int(entry[2]) + 1
-            #key to query var_set with
-            key = (chrom, bnd, ME)
-            #if we've seen this var, skip.
-            if key in var_set:
-                continue
-            #add var to set
-            var_set.add(key)
 
             #Mobster file 0-based; VCF 1-based
             start = int(entry[3]) + 1
