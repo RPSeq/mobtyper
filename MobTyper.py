@@ -91,7 +91,37 @@ def merge_mobster(mobster_dirs):
             sys.stderr.write("Error: mobster dirs do not contain correct bam files. Need *_mappedpotentials, *_splitanchors, and *_anchors")
             exit(0)
 
-    return read_mobster(predictions)        
+    return read_mobster(predictions)
+
+def read_vcf(vcf_file, samples=True):
+    '''Parses a vcf file, returning a vcf object and list of variants'''
+    in_header = True
+    header = []
+    vcf = Vcf()
+    variants = []
+
+    # read input VCF
+    for line in vcf_file:
+        if in_header:
+            if line[0] == '#':
+                header.append(line) 
+                # if line[1] != '#':
+                #     vcf_samples = line.rstrip().split('\t')[9:]
+                continue
+            else:
+                in_header = False
+                vcf.add_header(header)
+                #remove samples if specified
+                if not samples:
+                    vcf.sample_list = []
+
+        v = line.rstrip().split('\t')
+        var = Variant(v, vcf)
+        variants.append(var)
+
+    vcf_file.close()
+    return vcf, variants
+            
 
 def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, quiet):
     '''main genotyping function'''
@@ -123,43 +153,17 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
             sys.stderr.write("Error: mobster dirs do not contain correct bam files. Need *_mappedpotentials, *_splitanchors, and *_anchors")
             exit(0)
 
-
+    #if vcf file specified, read it without including samples (we are re-genotyping).
     if vcf_in:
-        in_header = True
-        header = []
-        mob_vcf = Vcf()
-        variants = []
-
-        # read input VCF
-        for line in vcf_in:
-            if in_header:
-                if line[0] == '#':
-                    header.append(line) 
-                    # if line[1] != '#':
-                    #     vcf_samples = line.rstrip().split('\t')[9:]
-                    continue
-                else:
-                    in_header = False
-                    mob_vcf.add_header(header)
-                    mob_vcf.sample_list = []
-
-                    # add the samples in the BAM files to the VCF output
-                    #for sample in sample_list:
-                        #if sample.name not in mob_vcf.sample_list:
-                            #mob_vcf.add_sample(sample.name)
-
-
-            v = line.rstrip().split('\t')
-            var = Variant(v, mob_vcf)
-            variants.append(var)
-
-        vcf_in.close()
+        get_samples = False
+        mob_vcf, variants = read_vcf(vcf_in, get_samples)
 
     else:
         mob_vcf, variants = read_mobster(predictions)
 
     if excludes:
         variants = filter_excludes(variants, excludes)
+
     #grab sample names
     for bam in all_bam:
         mob_vcf.add_sample(bam.header['RG'][0]['SM'])
