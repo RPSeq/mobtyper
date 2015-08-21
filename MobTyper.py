@@ -3,7 +3,7 @@
 import pysam
 import glob
 import argparse, sys
-import math, time, re
+import math, time, re, numpy
 from collections import Counter, defaultdict
 from argparse import RawTextHelpFormatter
 
@@ -122,6 +122,11 @@ def read_vcf(vcf_file, samples=True):
     vcf_file.close()
     return vcf, variants
             
+def n_median(num_list):
+    return int(numpy.median(numpy.array(num_list)))
+
+def n_mode(num_list):
+    return int(numpy.mode(numpy.array(num_list)))
 
 def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, quiet):
     '''main genotyping function'''
@@ -193,6 +198,10 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
         var.sample_list = mob_vcf.sample_list
         var.reset_genotypes()
 
+        # up, down = map(int, var.info['CI'].split(","))
+        # ci_start = var.pos + up - 1
+        # ci_stop = var.pos + down - 1
+
         #vcf is 1-based, BAM is 0-based; we're querying BAMs with VCF coords
         insert = int(var.pos) - 1
         #start = insert + int(borders[0])
@@ -210,18 +219,19 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
             split_alt, split_ref = 0,0
 
             #count split MEI read events at the site:
-            for me_read in sample.split.fetch(var.chrom, max(0,insert-15), insert+15):
+            for me_read in sample.split.fetch(var.chrom, insert-20, insert+20):
                 me_tag = me_read.opt('ME').split(";")
-                if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
+                # if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
+                if me_tag[2] == mei_type:
                     split_alt += 1
 
             #count pair MEI and pair ref events at the site
-            pair_excludes, pair_ref, pair_alt = count_mei_pairedend(var.chrom, var.pos, sample, mei_type, z, discflank, sample.excludes)
+            pair_excludes, pair_ref, pair_alt = count_mei_pairedend(var.chrom, var.pos, var.info['CI'], sample, mei_type, z, discflank, sample.excludes)
 
             #fetch reads overlapping the insertion site
             #count ref split reads at the site
             split_ref = 0
-            for ref_read in sample.bam.fetch(var.chrom, max(0, insert), insert+1):
+            for ref_read in sample.bam.fetch(var.chrom, insert-20, insert+20):
                 if not (ref_read.is_duplicate or 
                         ref_read.is_secondary or 
                         ref_read.mapq < 25 or 
@@ -328,10 +338,9 @@ def read_mobster(prediction_files):
     mob_vcf.add_format('RC', 1, 'Int', 'Ref support count')
     mob_vcf.add_format('AC', 1, 'Int', 'Alt support count')
 
-    var_id = 0
 
     #list will hold union set of vars
-    union = []
+    variants = []
     for file in prediction_files:
         for entry in file:
             entry = entry.strip().split("\t")
@@ -366,19 +375,6 @@ def read_mobster(prediction_files):
             pair5 = support5 - split5
             pair3 = support3 - split3
 
-            # polyA5 = int(entry[14])
-            # polyT5 = int(entry[15])
-            # polyA3 = int(entry[16])
-            # polyT3 = int(entry[17])
-
-            # TSD = entry[27]
-            # if TSD == "unknown":
-            #     TSD = "Unknown"
-            # elif TSD == "duplication":
-            #     TSD = "True"
-            # else:
-            #     TSD = "False"
-
             #crappy hacks to feed data to Variant() as a vcf row
             alt = "<INS:ME:{0}>".format(ME)
             #info str template (should match the mob_vcf info list)
@@ -386,41 +382,72 @@ def read_mobster(prediction_files):
             #insert values into info str
             info_str = info_str.format(ME, rel_start, rel_stop, support5+support3, pair5+pair3, split5+split3)
 
-            var_list = [chrom, bnd, var_id, "N", alt, ".", ".", info_str]
+            var_list = [chrom, bnd, 0, "N", alt, ".", ".", info_str]
 
             var = Variant(var_list, mob_vcf)
 
-            union.append(var)
+            variants.append(var)
+
+    merged = merge_overlaps(variants)
+    return mob_vcf, merged
+
+def merge_overlaps(variants):
+
+    mei_types = defaultdict(list)
+
+    "load MEI dict with variants"
+    for var in variants:
+        mei_types[var.info['MEI']].append(var)
 
     #sort the union set
-    union = sort_vars(union)
+    for ME, varlist in mei_types.viewitems():
+        mei_types[ME] = sort_vars(varlist, True)
 
-    prev_var = False
-
-    filtered = []
-    var_id = 1
-
-    """NOTE TO SELF: THIS IS SHITTY LOOP LOGIC, COULD CUT IN HALF"""
-    for var in union:
-        #don't report vars <= 20 bp from the previous var. This should be "smarter", but will have to do for now.
-        if prev_var:
-            if var.chrom == prev_var.chrom and var.info['MEI'] == prev_var.info['MEI'] and abs(var.pos - prev_var.pos) <= 20:
-                prev_var = var
+    #lets merge by overlapping bordered intervals
+    merged = []
+    pos_list = []
+    current_int = False
+    current_var = False
+    for ME, varlist in mei_types.viewitems():
+        for var in varlist:
+            up, down = map(int, var.info['CI'].split(","))
+            start = var.pos + up
+            stop = var.pos + down
+            if not current_int:
+                current_int = (start, stop)
+                current_var = var
+                pos_list.append(var.pos)
             else:
-                var.var_id = var_id
-                var_id += 1
-                filtered.append(var)
-        else:
-            var.var_id = var_id
-            var_id += 1
-            filtered.append(var)
+                if var.chrom == current_var.chrom and start <= current_int[1]:
+                    start = min(start, current_int[0])
+                    stop = max(stop, current_int[1])
+                    current_int = (start, stop)
+                    pos_list.append(var.pos)
+                else:
+                    m_pos = n_mode(pos_list)
+                    rel_start = current_int[0] - m_pos
+                    rel_stop = current_int[1] - m_pos
+                    current_var.pos = m_pos
+                    current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
+                    merged.append(current_var)
 
-        prev_var = var
+                    #reset
+                    current_int = (start, stop)
+                    current_var = var
+                    pos_list = [var.pos]
 
-    return mob_vcf, filtered
+        m_pos = n_median(pos_list)
+        rel_start = current_int[0] - m_pos
+        rel_stop = current_int[1] - m_pos
+        current_var.pos = m_pos
+        current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
+        merged.append(current_var)
+
+    return sort_vars(merged, False)
 
 def count_mei_pairedend(chrom,
                         pos,
+                        CI,
                         sample,
                         mei_type,
                         z,
@@ -434,12 +461,16 @@ def count_mei_pairedend(chrom,
     fetch_flank = sample.get_fetch_flank(z)
     tlens = []
 
-    for read in sample.pair.fetch(chrom, max(pos-(fetch_flank/2), 0), pos+(fetch_flank/2)):
+    # up, down = map(int, CI.split(","))
+    # ci_start = pos + up - 1
+    # ci_stop = pos + down - 1
+    insert = pos - 1
+    for read in sample.pair.fetch(chrom, max(insert-(fetch_flank/2), 0), insert+(fetch_flank/2)):
         me_tag = read.opt('ME').split(";")
         if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
             pair_alt += 1
 
-    for read in sample.bam.fetch(chrom, max(pos - (fetch_flank/2) - 15, 0), pos+(fetch_flank/2)+ 15):
+    for read in sample.bam.fetch(chrom, max(insert - (fetch_flank/2), 0), insert+(fetch_flank/2)):
         lib = sample.get_lib(read.opt('RG'))
         excludes = set()
         #improper orientation, unmapped, too far, different chrom, poor mate mapq
@@ -448,13 +479,14 @@ def count_mei_pairedend(chrom,
             or read.is_unmapped
             or read.mate_is_unmapped
             or read.is_duplicate
-            or read.aend - discflank < pos
+            or read.aend - discflank < insert
             or read.rname != read.rnext
             or read.mapq < 25
             or read.opt('MQ') < 25
             or int(read.opt('AS')) == int(read.opt('XS'))
             or read.qname in excludes
-            or read.tlen <= 0):
+            or read.tlen <= 0
+            or read.qlen < 86):
             continue
 
         else:
@@ -466,7 +498,7 @@ def count_mei_pairedend(chrom,
                 end = get_mate_5prime(sample.bam, read)
                 start = read.pos
             #continue if reads dont overlap with insert by at least discflank
-            if not ((pos - start < discflank) or (end - pos < discflank)):
+            if not ((end - insert < discflank) or (insert - start < discflank)):
                 if abs(zscore(read.tlen, lib.mean, lib.sd)) <= 3:
                     pair_ref+=1
                     excludes.add(read.qname)
@@ -888,11 +920,21 @@ class Mob_Sample(object):
     def get_lib(self, readgroup):
         return self.rg_to_lib[readgroup]
 
-def sort_vars(var_list):
+def sort_vars(var_list, CI=False):
     '''Sorts a list of var objects'''
-    return sorted(var_list, 
-        key = lambda x : (int(x.chrom) if x.chrom.isdigit() 
-            else x.chrom, int(x.pos)))
+    if CI:
+        var_list = sorted(var_list, 
+            key = lambda x : (int(x.chrom) if x.chrom.isdigit() 
+                else x.chrom, int(x.pos)+int(x.info['CI'].split(",")[0])))
+    else:
+        var_list = sorted(var_list, 
+            key = lambda x : (int(x.chrom) if x.chrom.isdigit() 
+                else x.chrom, int(x.pos)))
+    var_id = 1
+    for var in var_list:
+        var.var_id = var_id
+        var_id +=1
+    return var_list
 
 # return the genotype and log10 p-value
 def bayes_gt(ref, alt, is_dup):
