@@ -1,6 +1,7 @@
 from MobTyper import Variant, Mob_Sample, Vcf, Library
 from argparse import RawTextHelpFormatter
 import argparse, sys
+from collections import OrderedDict
 
 __author__ = "Ryan Smith (ryanpsmith@wustl.edu)"
 __version__ = "$Revision: 0.1.0 $"
@@ -28,8 +29,8 @@ def main():
     for var in hits:
         #sys.stderr.write(str(var.var_id))
         for sample in kids:
-            alt_count = int(var.gts[sample].format['AC'])
-            ref_count = float(var.gts[sample].format['RC'])
+            alt_count = int(var.gts[sample].format['AO'])
+            ref_count = float(var.gts[sample].format['RO'])
             hist.write("{0:.4f}\n".format(alt_count/(ref_count+alt_count)))
         #sys.stderr.write("\n")
 
@@ -64,26 +65,33 @@ def inheritance_check(variants):
     mom = 'NA12878'
     dad = 'NA12877'
     #sample_ID:[hom_ref, het, hom_alt]
-    kids = {'NA12879':[0,0,0], 'NA12880':[0,0,0], 'NA12881':[0,0,0], 'NA12882':[0,0,0], 'NA12883':[0,0,0], 'NA12884':[0,0,0], 'NA12885':[0,0,0], 'NA12886':[0,0,0], 'NA12887':[0,0,0], 'NA12888':[0,0,0], 'NA12893':[0,0,0]}
+    # kids = ['NA12879':[0,0,0], 'NA12880':[0,0,0], 'NA12881':[0,0,0], 'NA12882':[0,0,0], 'NA12883':[0,0,0], 'NA12884':[0,0,0], 'NA12885':[0,0,0], 'NA12886':[0,0,0], 'NA12887':[0,0,0], 'NA12888':[0,0,0], 'NA12893':[0,0,0], 'NA12878':[0,0,0],'NA12877':[0,0,0]}
+    #load dict with the children sample names
+    kids = OrderedDict()
+    for i in range(12877,12889):
+        name = "NA"+str(i)
+        kids[name]=[0,0,0]
+    kids['NA12893']=[0,0,0]
+
+    parents = {'NA12878':[0,0,0],'NA12877':[0,0,0]}
     hits = []
-    present_min = 10
-    absent_max = 3
+    present_min = 5
+    absent_max = 0
     for var in variants:
         #must be present in only one parent, and only one grandparent.
-        mom_count = int(var.gts[mom].format['AC'])
-        m_gf_count = int(var.gts[m_gf].format['AC'])
-        m_gm_count = int(var.gts[m_gm].format['AC'])
+        mom_count = int(var.gts[mom].format['AO'])
+        m_gf_count = int(var.gts[m_gf].format['AO'])
+        m_gm_count = int(var.gts[m_gm].format['AO'])
 
-        dad_count = int(var.gts[dad].format['AC'])
-        d_gf_count = int(var.gts[d_gf].format['AC'])
-        d_gm_count = int(var.gts[d_gm].format['AC'])
+        dad_count = int(var.gts[dad].format['AO'])
+        d_gf_count = int(var.gts[d_gf].format['AO'])
+        d_gm_count = int(var.gts[d_gm].format['AO'])
 
-        present_min = 20
-        absent_max = 0
         #is var a true het in mom? present in mom and one of her parents (and not dad), or dad and one of his parents (and not mom)
-        mom_het = (mom_count >= present_min and (m_gf_count >= present_min and m_gm_count == absent_max) or (m_gf_count == absent_max and m_gm_count >= present_min))
-        dad_het = (dad_count >= present_min and (d_gf_count >= present_min and d_gm_count == absent_max) or (d_gf_count == absent_max and d_gm_count >= present_min))
-        if (dad_het and mom_het) and var.qual:
+        mom_het = mom_count >= present_min and ((m_gf_count >= present_min and m_gm_count == absent_max) or (m_gf_count == absent_max and m_gm_count >= present_min))
+        dad_het = dad_count >= present_min and ((d_gf_count >= present_min and d_gm_count == absent_max) or (d_gf_count == absent_max and d_gm_count >= present_min))
+        if dad_het and mom_het and var.gts[mom].format['GT'] != "1/1" and var.gts[dad].format['GT'] != "1/1":
+        # if dad_het and mom_het and var.gts[mom].format['GT']:
             hits.append(var)
             for kid in kids:
                 if var.gts[kid].format['GT'] == "0/0":
@@ -96,6 +104,8 @@ def inheritance_check(variants):
     het = 0
     hom_alt = 0
     for name, counts in kids.viewitems():
+        if name == mom or name == dad:
+            continue
         hom_ref += counts[0]
         het += counts[1]
         hom_alt += counts[2]
@@ -104,6 +114,10 @@ def inheritance_check(variants):
         exit('Zero total')
     sys.stderr.write("Sample\t0/0\t0/1\t1/1\n")
     for kid, counts in kids.viewitems():
+        if kid == mom:
+            kid = "Mom"
+        if kid == dad:
+            kid = "Dad"
         sys.stderr.write(kid+"\t")
         total = float(sum(counts))
         sys.stderr.write("{0:.2f}\t{1:.2f}\t{2:.2f}\n".format((counts[0]/total)*100, (counts[1]/total)*100, (counts[2]/total)*100))
