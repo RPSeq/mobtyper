@@ -130,7 +130,7 @@ def n_median(num_list):
 def n_mode(num_list):
     return int(mode(numpy.array(num_list))[0])
 
-def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, quiet):
+def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, no_merge, quiet):
     '''main genotyping function'''
 
     vcf_out = open(vcf_out, 'w+')
@@ -438,10 +438,10 @@ def merge_overlaps(variants, no_merge):
     pos_list = []
     current_int = False
     current_var = False
-
     if no_merge:
         for ME, varlist in mei_types.viewitems():
             for var in varlist:
+                dumped = False
                 up, down = map(int, var.info['CI'].split(","))
                 start = var.pos + up
                 stop = var.pos + down
@@ -462,15 +462,19 @@ def merge_overlaps(variants, no_merge):
                         merged.append(current_var)
                         current_var = var
                         current_int = (start, stop)
+                        dumped = True
 
-            current_var.set_info('CI', "{0},{1}".format(current_int[0], current_int[1]))
-            merged.append(current_var)
-            current_var = var
-            current_int = (start, stop)
+            if not dumped:
+                rel_start = current_int[0] - current_var.pos
+                rel_stop = current_int[1] - current_var.pos
+                current_var.set_info('CI', "{0},{1}".format(rel_start, rel_stop))
+                merged.append(current_var)
+
 
     else:
         for ME, varlist in mei_types.viewitems():
             for var in varlist:
+                dumped = False
                 up, down = map(int, var.info['CI'].split(","))
                 start = var.pos + up
                 stop = var.pos + down
@@ -496,13 +500,15 @@ def merge_overlaps(variants, no_merge):
                         current_int = (start, stop)
                         current_var = var
                         pos_list = [var.pos]
-
-            m_pos = n_mode(pos_list)
-            rel_start = current_int[0] - m_pos
-            rel_stop = current_int[1] - m_pos
-            current_var.pos = m_pos
-            current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
-            merged.append(current_var)
+                        dumped = True
+                        
+            if not dumped:
+                m_pos = n_mode(pos_list)
+                rel_start = current_int[0] - m_pos
+                rel_stop = current_int[1] - m_pos
+                current_var.pos = m_pos
+                current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
+                merged.append(current_var)
 
     return sort_vars(merged, False)
 
