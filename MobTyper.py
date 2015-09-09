@@ -6,6 +6,7 @@ import argparse, sys
 import math, time, re, numpy
 from collections import Counter, defaultdict
 from argparse import RawTextHelpFormatter
+from scipy.stats import mode
 
 __author__ = "Ryan Smith (ryanpsmith@wustl.edu)"
 __version__ = "$Revision: 0.1.0 $"
@@ -26,6 +27,7 @@ description: Compute genotype of MEI variants based on breakpoint depth")
     parser.add_argument('-v', '--vcf_in', type=argparse.FileType('r'), required=False, default=False, help='Input VCF file. Overrides Mobster predictions: only the input variants will be genotyped')
     parser.add_argument('-e', '--excludes', type=argparse.FileType('r'), required=False, default=False, help='Regions to exclude (BED-like file)')
     parser.add_argument('-m', '--merge_only', required=False, default=False, action='store_true', help='Only produce a merged VCF from the given mobster dirs')
+    parser.add_argument('--no_merge', required=False, default=False, action='store_true', help='Do not merge calls by confidence intervals; instead merge by insertion site (taking the largest CI around it)')
     parser.add_argument('-q', '--quiet', required=False, default=False, action='store_true', help='Turn off stderr status outputs')
 
     # parse the arguments
@@ -34,12 +36,12 @@ description: Compute genotype of MEI variants based on breakpoint depth")
     #check for improper ref_bam and merge_only args combination
     if not args.ref_bams and not args.merge_only:
         sys.stderr.write(args.usage)
-        exit("Error: At least one reference BAM (-r) is required unless --merge_only (-m) is specified")
+        exit("Error: At least one reference BAM (-r) is required unless --merge_only (-m) is specified\n")
 
     #check matching ref and mobster file lens
     if args.ref_bams:
         if len(set([len(args.ref_bams), len(args.mob_dirs)])) > 1:
-            exit("Error: input mobster and bam file lists must be same length")
+            exit("Error: input mobster and bam file lists must be same length\n")
 
     return args
 
@@ -48,7 +50,7 @@ def main():
 
     #for merge_only mode
     if args.merge_only:
-        mob_vcf, variants = merge_mobster(args.mob_dirs)
+        mob_vcf, variants = merge_mobster(args.mob_dirs, args.no_merge)
         if args.excludes:
             variants = filter_excludes(variants, args.excludes)
         vcf_out = open(args.output, 'w')
@@ -59,7 +61,7 @@ def main():
 
     #normal mode
     else:
-        genotype_MEIs(args.ref_bams, args.mob_dirs, args.vcf_in, args.excludes, args.output, args.num_samp, args.splflank, args.discflank, args.quiet)
+        genotype_MEIs(args.ref_bams, args.mob_dirs, args.vcf_in, args.excludes, args.output, args.num_samp, args.splflank, args.discflank, args.no_merge, args.quiet)
     return
 
 def filter_excludes(variants, exclude_file):
@@ -79,7 +81,7 @@ def filter_excludes(variants, exclude_file):
     return filtered
 
 
-def merge_mobster(mobster_dirs):
+def merge_mobster(mobster_dirs, no_merge):
     predictions = []
     for path in mobster_dirs:
         if not path.endswith("/"):
@@ -88,10 +90,10 @@ def merge_mobster(mobster_dirs):
             calls = glob.glob(path+"*predictions.txt")[0]
             predictions.append(open(calls, 'r'))
         except:
-            sys.stderr.write("Error: mobster dirs do not contain correct bam files. Need *_mappedpotentials, *_splitanchors, and *_anchors")
+            sys.stderr.write("Error: mobster dirs do not contain correct bam files. Need *_mappedpotentials, *_splitanchors, and *_anchors\n")
             exit(0)
 
-    return read_mobster(predictions)
+    return read_mobster(predictions, no_merge)
 
 def read_vcf(vcf_file, samples=True):
     '''Parses a vcf file, returning a vcf object and list of variants'''
@@ -126,7 +128,7 @@ def n_median(num_list):
     return int(numpy.median(numpy.array(num_list)))
 
 def n_mode(num_list):
-    return int(numpy.mode(numpy.array(num_list)))
+    return int(mode(numpy.array(num_list))[0])
 
 def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, quiet):
     '''main genotyping function'''
@@ -155,7 +157,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
             splits.append(pysam.Samfile(split, 'rb'))
             pairs.append(pysam.Samfile(pair, 'rb'))
         except:
-            sys.stderr.write("Error: mobster dirs do not contain correct bam files. Need *_mappedpotentials, *_splitanchors, and *_anchors")
+            sys.stderr.write("Error: mobster dirs do not contain correct bam files. Need *_mappedpotentials, *_splitanchors, and *_anchors\n")
             exit(0)
 
     #if vcf file specified, read it without including samples (we are re-genotyping).
@@ -164,7 +166,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
         mob_vcf, variants = read_vcf(vcf_in, get_samples)
 
     else:
-        mob_vcf, variants = read_mobster(predictions)
+        mob_vcf, variants = read_mobster(predictions, no_merge)
 
     if excludes:
         variants = filter_excludes(variants, excludes)
@@ -251,10 +253,26 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
             SU += (pair_alt+split_alt)
 
             if split_alt + pair_alt + pair_ref + split_ref > 0:
+                #use dupe expected alt/ref likelihoods for each GT
                 is_dup = True
+
                 gt_lplist = bayes_gt(split_ref+pair_ref, split_alt+pair_alt, is_dup)
                 gt_idx = gt_lplist.index(max(gt_lplist))
+
+                try:
+                    allele_balance = (split_alt+pair_alt)/float(split_alt+pair_alt+split_ref+pair_ref)
+                except ZeroDivisionError:
+                    allele_balance = "."
+
                 var.genotype(sample.name).set_format('GL', ','.join(['%.0f' % x for x in gt_lplist]))
+                var.genotype(sample.name).set_format('DP', split_ref+pair_ref+split_alt+pair_alt)
+                var.genotype(sample.name).set_format('RO', split_ref+pair_ref)
+                var.genotype(sample.name).set_format('AO', split_alt+pair_alt)
+                var.genotype(sample.name).set_format('RS', split_ref)
+                var.genotype(sample.name).set_format('AS', split_alt)
+                var.genotype(sample.name).set_format('RP', pair_ref)
+                var.genotype(sample.name).set_format('AP', pair_alt)
+                var.genotype(sample.name).set_format('AB', allele_balance)
 
                 # assign genotypes
                 gt_sum = 0
@@ -263,6 +281,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
                         gt_sum += 10**gt
                     except OverflowError:
                         gt_sum += 0
+
                 if gt_sum > 0:
                     gt_sum_log = math.log(gt_sum, 10)
                     sample_qual = abs(-10 * (gt_lplist[0] - gt_sum_log)) # phred-scaled probability site is non-reference in this sample
@@ -270,10 +289,9 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
                         phred_gq = 200                    
                     else:
                         phred_gq = abs(-10 * math.log(1 - (10**gt_lplist[gt_idx] / 10**gt_sum_log), 10))
+
                     var.genotype(sample.name).set_format('GQ', phred_gq)
                     var.genotype(sample.name).set_format('SQ', sample_qual)
-                    var.genotype(sample.name).set_format('RC', pair_ref+split_ref)
-                    var.genotype(sample.name).set_format('AC', pair_alt+split_alt)
 
                     var.qual += sample_qual
                     if gt_idx == 1:
@@ -286,17 +304,22 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
                     var.genotype(sample.name).set_format('GQ', '.')
                     var.genotype(sample.name).set_format('SQ', '.')
                     var.genotype(sample.name).set_format('GT', './.')
-                    var.genotype(sample.name).set_format('RC', '0')
-                    var.genotype(sample.name).set_format('AC', '0')
+
             else:
                 var.genotype(sample.name).set_format('GT', './.')
                 var.qual = 0
                 var.genotype(sample.name).set_format('GQ', '.')
                 var.genotype(sample.name).set_format('SQ', '.')
                 var.genotype(sample.name).set_format('GL', '.')
-                var.genotype(sample.name).set_format('RC', '0')
-                var.genotype(sample.name).set_format('AC', '0')
-
+                var.genotype(sample.name).set_format('DP', 0)
+                var.genotype(sample.name).set_format('AO', 0)
+                var.genotype(sample.name).set_format('RO', 0)
+                # if detailed:
+                var.genotype(sample.name).set_format('AS', 0)
+                var.genotype(sample.name).set_format('RS', 0)
+                var.genotype(sample.name).set_format('AP', 0)
+                var.genotype(sample.name).set_format('RP', 0)
+                var.genotype(sample.name).set_format('AB', '.')
 
         # after all samples have been processed, write
         var.set_info('PE', PE)
@@ -309,7 +332,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
 
     vcf_out.close()
 
-def read_mobster(prediction_files):
+def read_mobster(prediction_files, no_merge):
     '''returns a VCF object and union of variants for all Mobster prediction files given'''
 
     #create Vcf object
@@ -331,12 +354,19 @@ def read_mobster(prediction_files):
     mob_vcf.add_info("SR", "1", "Integer", "Number of split reads supporting the variant across all samples")
 
     #Add FORMAT field for genotype
-    mob_vcf.add_format("GT", "1", "String", "Genotype")
-    mob_vcf.add_format('GL', 'G', 'Float', 'Genotype Likelihood, log10-scaled likelihoods of the data given the called genotype for each possible genotype generated from the reference and alternate alleles given the sample ploidy')
     mob_vcf.add_format('GQ', 1, 'Float', 'Genotype quality')
-    mob_vcf.add_format('SQ', 1, 'Float', 'Phred-scaled probability that this site is variant (non-reference in this sample')
-    mob_vcf.add_format('RC', 1, 'Int', 'Ref support count')
-    mob_vcf.add_format('AC', 1, 'Int', 'Alt support count')
+    mob_vcf.add_format('SQ', 1, 'Float', 'Phred-scaled probability that this site is variant (MEI insertion in this sample')
+    mob_vcf.add_format('GL', 'G', 'Float', 'Genotype Likelihood, log10-scaled likelihoods of the data given the called genotype for each possible genotype generated from the reference and alternate alleles given the sample ploidy')
+    mob_vcf.add_format('DP', 1, 'Integer', 'Read depth')
+    mob_vcf.add_format('RO', 1, 'Integer', 'Reference allele observation count')
+    mob_vcf.add_format('AO', 'A', 'Integer', 'Alternate allele observation count')
+    # mob_vcf.add_format('QR', 1, 'Integer', 'Sum of quality of reference observations')
+    # mob_vcf.add_format('QA', 'A', 'Integer', 'Sum of quality of alternate observations')
+    mob_vcf.add_format('RS', 1, 'Integer', 'Reference allele split-read observation count')
+    mob_vcf.add_format('AS', 'A', 'Integer', 'Alternate allele split-read observation count')
+    mob_vcf.add_format('RP', 1, 'Integer', 'Reference allele paired-end observation count')
+    mob_vcf.add_format('AP', 'A', 'Integer', 'Alternate allele paired-end observation count')
+    mob_vcf.add_format('AB', 'A', 'Float', 'Allele balance, fraction of observations from alternate allele, QA/(QR+QA)')
 
 
     #list will hold union set of vars
@@ -388,10 +418,10 @@ def read_mobster(prediction_files):
 
             variants.append(var)
 
-    merged = merge_overlaps(variants)
+    merged = merge_overlaps(variants, no_merge)
     return mob_vcf, merged
 
-def merge_overlaps(variants):
+def merge_overlaps(variants, no_merge):
 
     mei_types = defaultdict(list)
 
@@ -408,40 +438,71 @@ def merge_overlaps(variants):
     pos_list = []
     current_int = False
     current_var = False
-    for ME, varlist in mei_types.viewitems():
-        for var in varlist:
-            up, down = map(int, var.info['CI'].split(","))
-            start = var.pos + up
-            stop = var.pos + down
-            if not current_int:
-                current_int = (start, stop)
-                current_var = var
-                pos_list.append(var.pos)
-            else:
-                if var.chrom == current_var.chrom and start <= current_int[1]:
-                    start = min(start, current_int[0])
-                    stop = max(stop, current_int[1])
-                    current_int = (start, stop)
-                    pos_list.append(var.pos)
-                else:
-                    m_pos = n_mode(pos_list)
-                    rel_start = current_int[0] - m_pos
-                    rel_stop = current_int[1] - m_pos
-                    current_var.pos = m_pos
-                    current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
-                    merged.append(current_var)
 
-                    #reset
+    if no_merge:
+        for ME, varlist in mei_types.viewitems():
+            for var in varlist:
+                up, down = map(int, var.info['CI'].split(","))
+                start = var.pos + up
+                stop = var.pos + down
+                if not current_var:
+                    current_var = var
+                    current_int = (start, stop)
+                else:
+                    #if same position:
+                    if var.chrom == current_var.chrom and var.pos == current_var.pos:
+                        #if the interval is larger that previous, take it.
+                        if stop-start > current_int[1] - current_int[0]:
+                            current_int = (start, stop)
+
+                    else:
+                        rel_start = current_int[0] - current_var.pos
+                        rel_stop = current_int[1] - current_var.pos
+                        current_var.set_info('CI', "{0},{1}".format(rel_start, rel_stop))
+                        merged.append(current_var)
+                        current_var = var
+                        current_int = (start, stop)
+
+            current_var.set_info('CI', "{0},{1}".format(current_int[0], current_int[1]))
+            merged.append(current_var)
+            current_var = var
+            current_int = (start, stop)
+
+    else:
+        for ME, varlist in mei_types.viewitems():
+            for var in varlist:
+                up, down = map(int, var.info['CI'].split(","))
+                start = var.pos + up
+                stop = var.pos + down
+                if not current_int:
                     current_int = (start, stop)
                     current_var = var
-                    pos_list = [var.pos]
+                    pos_list.append(var.pos)
+                else:
+                    if var.chrom == current_var.chrom and start <= current_int[1]:
+                        start = min(start, current_int[0])
+                        stop = max(stop, current_int[1])
+                        current_int = (start, stop)
+                        pos_list.append(var.pos)
+                    else:
+                        m_pos = n_mode(pos_list)
+                        rel_start = current_int[0] - m_pos
+                        rel_stop = current_int[1] - m_pos
+                        current_var.pos = m_pos
+                        current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
+                        merged.append(current_var)
 
-        m_pos = n_median(pos_list)
-        rel_start = current_int[0] - m_pos
-        rel_stop = current_int[1] - m_pos
-        current_var.pos = m_pos
-        current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
-        merged.append(current_var)
+                        #reset
+                        current_int = (start, stop)
+                        current_var = var
+                        pos_list = [var.pos]
+
+            m_pos = n_mode(pos_list)
+            rel_start = current_int[0] - m_pos
+            rel_stop = current_int[1] - m_pos
+            current_var.pos = m_pos
+            current_var.set_info('CI', "{0},{1}".format(rel_start,rel_stop))
+            merged.append(current_var)
 
     return sort_vars(merged, False)
 
