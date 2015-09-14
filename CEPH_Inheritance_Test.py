@@ -15,6 +15,8 @@ version: " + __version__ + "\n\
 description: Compute genotype of MEI variants based on breakpoint depth")
     parser.add_argument('-i', '--vcf_in', type=argparse.FileType('r'), required=True, default=False, help='Input VCF file')
     parser.add_argument('-o', '--output', type=argparse.FileType('w'), required=False, default=sys.stdout, help='Output file [stdout]')
+    parser.add_argument('-v', '--vcf', type=argparse.FileType('w'), required=False, default=False, help='Output VCF')
+
 
     # parse the arguments
     args = parser.parse_args()
@@ -23,16 +25,21 @@ description: Compute genotype of MEI variants based on breakpoint depth")
 def main():
     args = get_args()
     vcf, variants = read_vcf(args.vcf_in)
+    # args.vcf.write(vcf.get_header()+"\n")
     hits = inheritance_check(variants)
     kids = ['NA12879', 'NA12880', 'NA12881', 'NA12882', 'NA12883', 'NA12884', 'NA12885', 'NA12886', 'NA12887', 'NA12888', 'NA12893']
     hist = open("allele-balance.txt", "w")
+    parents = ['NA12878','NA12877']
     for var in hits:
         #sys.stderr.write(str(var.var_id))
-        for sample in kids:
+        for sample in var.sample_list:
             alt_count = int(var.gts[sample].format['AO'])
             ref_count = float(var.gts[sample].format['RO'])
-            hist.write("{0:.4f}\n".format(alt_count/(ref_count+alt_count)))
-        #sys.stderr.write("\n")
+            if sample in kids:
+                hist.write("{0}\t{1}\t{2:.4f}\n".format(sample, "kid" , (alt_count/(ref_count+alt_count))))
+            elif sample in parents:
+                hist.write("{0}\t{1}\t{2:.4f}\n".format(sample, "parent" , (alt_count/(ref_count+alt_count))))
+
 
 def read_vcf(vcf_in):
     in_header = True
@@ -90,8 +97,8 @@ def inheritance_check(variants):
         #is var a true het in mom? present in mom and one of her parents (and not dad), or dad and one of his parents (and not mom)
         mom_het = mom_count >= present_min and ((m_gf_count >= present_min and m_gm_count == absent_max) or (m_gf_count == absent_max and m_gm_count >= present_min))
         dad_het = dad_count >= present_min and ((d_gf_count >= present_min and d_gm_count == absent_max) or (d_gf_count == absent_max and d_gm_count >= present_min))
-        if dad_het and mom_het and var.gts[mom].format['GT'] != "1/1" and var.gts[dad].format['GT'] != "1/1":
-        # if dad_het and mom_het and var.gts[mom].format['GT']:
+        #if dad_het and mom_het and var.gts[mom].format['GT'] != "1/1" and var.gts[dad].format['GT'] != "1/1":
+        if dad_het and mom_het:
             hits.append(var)
             for kid in kids:
                 if var.gts[kid].format['GT'] == "0/0":
