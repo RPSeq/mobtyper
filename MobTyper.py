@@ -4,6 +4,7 @@ import pysam
 import glob
 import argparse, sys
 import math, time, re, numpy
+from intervaltree import Interval, IntervalTree
 from collections import Counter, defaultdict
 from argparse import RawTextHelpFormatter
 from scipy.stats import mode
@@ -65,8 +66,8 @@ def main():
     return
 
 def filter_excludes(variants, exclude_file):
-    '''should make a hash for this'''
-    excludes = defaultdict(set)
+    #need a list of interval tuples to construct the excludes interval tree
+    excludes = defaultdict(IntervalTree)
     filtered = []
     for line in exclude_file:
         if line[0] != "#":
@@ -74,10 +75,14 @@ def filter_excludes(variants, exclude_file):
             chrom = line[0]
             start = int(line[1])
             stop = int(line[2])
-            excludes[chrom].update(range(start+1, stop+2))
+            #just using for present/absent so data is meaningless
+            #intervaltree.addi(start, stop, data)
+            #excludes are .bed (0-based), variants are .vcf (1-based),
+            excludes[chrom].addi(start+1, stop+2, 1)
     for variant in variants:
-        if variant.pos not in excludes[variant.chrom]:
+        if len(excludes[variant.chrom][variant.pos]) == 0:
             filtered.append(variant)
+
     return filtered
 
 
@@ -167,7 +172,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
 
     else:
         mob_vcf, variants = read_mobster(predictions, no_merge)
-
+        
     if excludes:
         variants = filter_excludes(variants, excludes)
 
