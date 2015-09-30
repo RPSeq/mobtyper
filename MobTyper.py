@@ -30,6 +30,8 @@ description: Compute genotype of MEI variants based on breakpoint depth")
     parser.add_argument('-m', '--merge_only', required=False, default=False, action='store_true', help='Only produce a merged VCF from the given mobster dirs')
     parser.add_argument('--no_merge', required=False, default=False, action='store_true', help='Do not merge calls by confidence intervals; instead merge by insertion site (taking the largest CI around it)')
     parser.add_argument('-q', '--quiet', required=False, default=False, action='store_true', help='Turn off stderr status outputs')
+    parser.add_argument('-p', '--pair', required=False, default=False, action='store_true', help='Only use paired-end reads')
+    parser.add_argument('-s', '--split', required=False, default=False, action='store_true', help='Only use split reads')
 
     # parse the arguments
     args = parser.parse_args()
@@ -62,7 +64,7 @@ def main():
 
     #normal mode
     else:
-        genotype_MEIs(args.ref_bams, args.mob_dirs, args.vcf_in, args.excludes, args.output, args.num_samp, args.splflank, args.discflank, args.no_merge, args.quiet)
+        genotype_MEIs(args.ref_bams, args.mob_dirs, args.vcf_in, args.excludes, args.output, args.num_samp, args.splflank, args.discflank, args.no_merge, args.quiet, args.pair, args.split)
     return
 
 def filter_excludes(variants, exclude_file):
@@ -134,7 +136,7 @@ def n_median(num_list):
 def n_mode(num_list):
     return int(mode(numpy.array(num_list))[0])
 
-def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, no_merge, quiet):
+def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, splflank, discflank, no_merge, quiet, pair_only, split_only):
     '''main genotyping function'''
 
     vcf_out = open(vcf_out, 'w+')
@@ -221,34 +223,37 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
 
         for sample in sample_list:
 
-            #set split counters to zero
-            split_alt, split_ref = 0,0
+            #set counters to zero
+            split_alt, split_ref, pair_alt, pair_ref = 0,0,0,0
+            split_excludes = set()
+            if not pair_only:
+                #count split MEI read events at the site:
+                for me_read in sample.split.fetch(var.chrom, insert-5, insert+5):
+                    me_tag = me_read.opt('ME').split(";")
+                    # if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
+                    if me_tag[2] == mei_type:
+                        split_alt += 1
+                        split_excludes.add(me_read.qname)
 
-            #count split MEI read events at the site:
-            for me_read in sample.split.fetch(var.chrom, insert-5, insert+5):
-                me_tag = me_read.opt('ME').split(";")
-                # if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
-                if me_tag[2] == mei_type:
-                    split_alt += 1
+                #fetch reads overlapping the insertion site
+                #count ref split reads at the site
+                split_ref = 0
+                for ref_read in sample.bam.fetch(var.chrom, insert-5, insert+5):
+                    if not (ref_read.is_duplicate or 
+                            ref_read.is_secondary or 
+                            ref_read.mapq < 25 or 
+                            ref_read.is_unmapped or
+                            ref_read.mate_is_unmapped or
+                            ref_read.qname in sample.excludes or
+                            ref_read.qname in split_excludes):
+                        for p in xrange(ref_read.pos + 1, ref_read.aend + 1):
+                            if p - ref_read.pos >= splflank and ref_read.aend - p >= splflank:
+                                split_ref += 1
+                                break
 
             #count pair MEI and pair ref events at the site
-            pair_excludes, pair_ref, pair_alt = count_mei_pairedend(var.chrom, var.pos, var.info['CI'], sample, mei_type, z, discflank, sample.excludes)
-
-            #fetch reads overlapping the insertion site
-            #count ref split reads at the site
-            split_ref = 0
-            for ref_read in sample.bam.fetch(var.chrom, insert-5, insert+5):
-                if not (ref_read.is_duplicate or 
-                        ref_read.is_secondary or 
-                        ref_read.mapq < 25 or 
-                        ref_read.is_unmapped or
-                        ref_read.mate_is_unmapped or
-                        ref_read.qname in sample.excludes or
-                        ref_read.qname in pair_excludes):
-                    for p in xrange(ref_read.pos + 1, ref_read.aend + 1):
-                        if p - ref_read.pos >= splflank and ref_read.aend - p >= splflank:
-                            split_ref += 1
-                            break
+            if not split_only:
+                pair_ref, pair_alt = count_mei_pairedend(var.chrom, var.pos, var.info['CI'], sample, mei_type, z, discflank, split_excludes)
 
             #increment total supporting evidence counts
             PE += pair_alt
@@ -522,7 +527,7 @@ def count_mei_pairedend(chrom,
                         mei_type,
                         z,
                         discflank,
-                        excludes):
+                        split_excludes):
     """Function to count number of concordant read pairs supporting the reference call at given var coordinates."""
 
     pair_ref = 0
@@ -540,7 +545,7 @@ def count_mei_pairedend(chrom,
         if me_tag[2] == mei_type:
             pair_alt += 1
 
-    pair_excludes = set()
+    #pair_excludes = set()
     
     for read in sample.bam.fetch(chrom, max(insert - (fetch_flank), 0), insert+(fetch_flank)):
         lib = sample.get_lib(read.opt('RG'))
@@ -554,7 +559,8 @@ def count_mei_pairedend(chrom,
             or read.rname != read.rnext
             or read.mapq < 25
             or read.opt('MQ') < 25
-            or read.qname in excludes
+            or read.qname in sample.excludes
+            or read.qname in split_excludes
             or read.tlen <= 0):
             continue
 
@@ -570,9 +576,10 @@ def count_mei_pairedend(chrom,
             if not ((end - insert < discflank) or (insert - start < discflank)):
                 if abs(zscore(read.tlen, lib.mean, lib.sd)) <= 3:
                     pair_ref+=1
-                    pair_excludes.add(read.qname)
+                    #pair_excludes.add(read.qname)
 
-    return pair_excludes, pair_ref, pair_alt
+    #return pair_excludes, pair_ref, pair_alt
+    return pair_ref, pair_alt
 
 class Vcf(object):
     def __init__(self):
