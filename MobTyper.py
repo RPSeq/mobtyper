@@ -85,7 +85,6 @@ def filter_excludes(variants, exclude_file):
 
     return filtered
 
-
 def merge_mobster(mobster_dirs, no_merge):
     predictions = []
     for path in mobster_dirs:
@@ -172,7 +171,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
 
     else:
         mob_vcf, variants = read_mobster(predictions, no_merge)
-        
+
     if excludes:
         variants = filter_excludes(variants, excludes)
 
@@ -226,7 +225,7 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
             split_alt, split_ref = 0,0
 
             #count split MEI read events at the site:
-            for me_read in sample.split.fetch(var.chrom, insert-20, insert+20):
+            for me_read in sample.split.fetch(var.chrom, insert-5, insert+5):
                 me_tag = me_read.opt('ME').split(";")
                 # if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
                 if me_tag[2] == mei_type:
@@ -238,12 +237,11 @@ def genotype_MEIs(all_bam, mobster_dirs, vcf_in, excludes, vcf_out, num_samp, sp
             #fetch reads overlapping the insertion site
             #count ref split reads at the site
             split_ref = 0
-            for ref_read in sample.bam.fetch(var.chrom, insert-20, insert+20):
+            for ref_read in sample.bam.fetch(var.chrom, insert-5, insert+5):
                 if not (ref_read.is_duplicate or 
                         ref_read.is_secondary or 
                         ref_read.mapq < 25 or 
                         ref_read.is_unmapped or
-                        ref_read.qlen < 90 or 
                         ref_read.mate_is_unmapped or
                         ref_read.qname in sample.excludes or
                         ref_read.qname in pair_excludes):
@@ -537,14 +535,15 @@ def count_mei_pairedend(chrom,
     # ci_start = pos + up - 1
     # ci_stop = pos + down - 1
     insert = pos - 1
-    for read in sample.pair.fetch(chrom, max(insert-(fetch_flank/2), 0), insert+(fetch_flank/2)):
+    for read in sample.pair.fetch(chrom, max(insert-(fetch_flank), 0), insert+(fetch_flank)):
         me_tag = read.opt('ME').split(";")
-        if me_tag[2] == mei_type or me_tag[-2] == "polyA" or me_tag[-2] == "polyT":
+        if me_tag[2] == mei_type:
             pair_alt += 1
 
-    for read in sample.bam.fetch(chrom, max(insert - (fetch_flank/2), 0), insert+(fetch_flank/2)):
+    pair_excludes = set()
+    
+    for read in sample.bam.fetch(chrom, max(insert - (fetch_flank), 0), insert+(fetch_flank)):
         lib = sample.get_lib(read.opt('RG'))
-        excludes = set()
         #improper orientation, unmapped, too far, different chrom, poor mate mapq
         if (read.is_reverse == read.mate_is_reverse
             or read.is_secondary
@@ -555,10 +554,8 @@ def count_mei_pairedend(chrom,
             or read.rname != read.rnext
             or read.mapq < 25
             or read.opt('MQ') < 25
-            or int(read.opt('AS')) == int(read.opt('XS'))
             or read.qname in excludes
-            or read.tlen <= 0
-            or read.qlen < 86):
+            or read.tlen <= 0):
             continue
 
         else:
@@ -573,9 +570,9 @@ def count_mei_pairedend(chrom,
             if not ((end - insert < discflank) or (insert - start < discflank)):
                 if abs(zscore(read.tlen, lib.mean, lib.sd)) <= 3:
                     pair_ref+=1
-                    excludes.add(read.qname)
+                    pair_excludes.add(read.qname)
 
-    return excludes, pair_ref, pair_alt
+    return pair_excludes, pair_ref, pair_alt
 
 class Vcf(object):
     def __init__(self):
